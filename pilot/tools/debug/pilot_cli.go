@@ -88,6 +88,7 @@ type PodInfo struct {
 	Namespace string
 	IP        string
 	ProxyType string
+	domain    string
 }
 
 func getAllPods(kubeconfig string) (*v1.PodList, error) {
@@ -102,7 +103,7 @@ func getAllPods(kubeconfig string) (*v1.PodList, error) {
 	return clientset.CoreV1().Pods(meta_v1.NamespaceAll).List(meta_v1.ListOptions{})
 }
 
-func NewPodInfo(nameOrAppLabel string, kubeconfig string, proxyType string) *PodInfo {
+func NewPodInfo(nameOrAppLabel string, kubeconfig string, proxyType string, domain string) *PodInfo {
 	log.Infof("Using kube config at %s", kubeconfig)
 	pods, err := getAllPods(kubeconfig)
 	if err != nil {
@@ -112,31 +113,25 @@ func NewPodInfo(nameOrAppLabel string, kubeconfig string, proxyType string) *Pod
 
 	for _, pod := range pods.Items {
 		log.Infof("pod %q", pod.Name)
+		podInfo := &PodInfo{
+			Name:      pod.Name,
+			Namespace: pod.Namespace,
+			IP:        pod.Status.PodIP,
+			domain:    domain,
+		}
 		if pod.Name == nameOrAppLabel {
 			log.Infof("Found pod %s.%s~%s matching name %q", pod.Name, pod.Namespace, pod.Status.PodIP, nameOrAppLabel)
-			return &PodInfo{
-				Name:      pod.Name,
-				Namespace: pod.Namespace,
-				IP:        pod.Status.PodIP,
-				ProxyType: proxyType,
-			}
+			podInfo.ProxyType = proxyType
+			return podInfo
 		}
 		if app, ok := pod.ObjectMeta.Labels["app"]; ok && app == nameOrAppLabel {
 			log.Infof("Found pod %s.%s~%s matching app label %q", pod.Name, pod.Namespace, pod.Status.PodIP, nameOrAppLabel)
-			return &PodInfo{
-				Name:      pod.Name,
-				Namespace: pod.Namespace,
-				IP:        pod.Status.PodIP,
-				ProxyType: proxyType,
-			}
+			podInfo.ProxyType = proxyType
+			return podInfo
 		}
 		if istio, ok := pod.ObjectMeta.Labels["istio"]; ok && istio == nameOrAppLabel {
 			log.Infof("Found pod %s.%s~%s matching app label %q", pod.Name, pod.Namespace, pod.Status.PodIP, nameOrAppLabel)
-			return &PodInfo{
-				Name:      pod.Name,
-				Namespace: pod.Namespace,
-				IP:        pod.Status.PodIP,
-			}
+			return podInfo
 		}
 	}
 	log.Warnf("Cannot find pod with name or app label matching %q in registry.", nameOrAppLabel)
@@ -145,15 +140,15 @@ func NewPodInfo(nameOrAppLabel string, kubeconfig string, proxyType string) *Pod
 
 func (p PodInfo) makeNodeID() string {
 	if p.ProxyType != "" {
-		return fmt.Sprintf("%s~%s~%s.%s~%s.svc.cluster.local", p.ProxyType, p.IP, p.Name, p.Namespace, p.Namespace)
+		return fmt.Sprintf("%s~%s~%s.%s~%s.svc.%s", p.ProxyType, p.IP, p.Name, p.Namespace, p.Namespace, p.domain)
 	}
 	if strings.HasPrefix(p.Name, "istio-ingressgateway") || strings.HasPrefix(p.Name, "istio-egressgateway") {
-		return fmt.Sprintf("router~%s~%s.%s~%s.svc.cluster.local", p.IP, p.Name, p.Namespace, p.Namespace)
+		return fmt.Sprintf("router~%s~%s.%s~%s.svc.%s", p.IP, p.Name, p.Namespace, p.Namespace, p.domain)
 	}
 	if strings.HasPrefix(p.Name, "istio-ingress") {
-		return fmt.Sprintf("ingress~%s~%s.%s~%s.svc.cluster.local", p.IP, p.Name, p.Namespace, p.Namespace)
+		return fmt.Sprintf("ingress~%s~%s.%s~%s.svc.%s", p.IP, p.Name, p.Namespace, p.Namespace, p.domain)
 	}
-	return fmt.Sprintf("sidecar~%s~%s.%s~%s.svc.cluster.local", p.IP, p.Name, p.Namespace, p.Namespace)
+	return fmt.Sprintf("sidecar~%s~%s.%s~%s.svc.%s", p.IP, p.Name, p.Namespace, p.Namespace, p.domain)
 }
 
 func configTypeToTypeURL(configType string) string {
@@ -292,6 +287,7 @@ func portForwardPilot(kubeConfig, pilotURL string) (error, *os.Process, string) 
 
 func main() {
 	kubeConfig := flag.String("kubeconfig", "~/.kube/config", "path to the kubeconfig file. Default is ~/.kube/config")
+	domain := flag.String("domain", "cluster.local", "DNS domain suffix, default cluster.local")
 	pilotURL := flag.String("pilot", "", "pilot address. Will try port forward if not provided.")
 	configType := flag.String("type", "lds", "lds, cds, or eds. Default lds.")
 	proxyType := flag.String("proxytype", "", "sidecar, ingress, router.")
@@ -316,7 +312,7 @@ func main() {
 
 	var resp *xdsapi.DiscoveryResponse
 	if *configType == "lds" || *configType == "cds" {
-		pod := NewPodInfo(*resources, resolveKubeConfigPath(*kubeConfig), *proxyType)
+		pod := NewPodInfo(*resources, resolveKubeConfigPath(*kubeConfig), *proxyType, *domain)
 		resp = pod.getResource(pilot, *configType)
 	} else if *configType == "eds" {
 		resp = edsRequest(pilot, makeEDSRequest(*resources))
